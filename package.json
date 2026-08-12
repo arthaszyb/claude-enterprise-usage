@@ -1,0 +1,42 @@
+{
+  "name": "claude-enterprise-usage",
+  "displayName": "Claude Enterprise Usage",
+  "description": "Shows Claude Enterprise member usage in the VS Code status bar.",
+  "version": "0.2.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": { "vscode": "^1.94.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "claudeEnterpriseUsage.refresh", "title": "Claude Enterprise Usage: Refresh" },
+      { "command": "claudeEnterpriseUsage.showDetails", "title": "Claude Enterprise Usage: Show details" }
+    ],
+    "configuration": {
+      "title": "Claude Enterprise Usage",
+      "properties": {
+        "claudeEnterpriseUsage.refreshIntervalSeconds": {
+          "type": "number", "default": 300, "minimum": 60,
+          "description": "How often to refresh the usage data."
+        },
+        "claudeEnterpriseUsage.showEstimatedCost": {
+          "type": "boolean", "default": true,
+          "description": "Show estimated month-to-date cost when the account returns it."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@types/vscode": "^1.94.0",
+    "typescript": "^5.7.2",
+    "@vscode/vsce": "^3.2.1"
+  }
+}
