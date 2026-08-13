@@ -40,7 +40,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const refresh = async (quiet = false, allowRemote = true) => {
     // This is fast and entirely local: it is safe to run once per Claude response.
     try {
-      cost = await getLatestSessionCost();
+      cost = await getLatestSessionCost(activeClaudeTabLabel());
     } catch (error) {
       usageStatus = `Could not read local Claude Code log: ${error instanceof Error ? error.message : String(error)}`;
     }
@@ -80,6 +80,14 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(new vscode.Disposable(() => item.dispose()));
   const timer = setInterval(() => void refresh(true), Math.max(seconds, 60) * 1000);
   context.subscriptions.push({ dispose: () => clearInterval(timer) });
+
+  // Claude editor tabs expose their generated conversation title. Match that
+  // title to the `ai-title` record in the local JSONL transcript whenever the
+  // user switches tabs.
+  context.subscriptions.push(
+    vscode.window.tabGroups.onDidChangeTabs(() => void refresh(true, false)),
+    vscode.window.tabGroups.onDidChangeTabGroups(() => void refresh(true, false)),
+  );
 
   // Claude Code appends an assistant record after every model response. Update only
   // local token estimates here: the API-backed MTD is intentionally rate-limited.
@@ -175,16 +183,27 @@ async function showDetails(usage?: UsageResponse, cost?: Cost): Promise<void> {
   await vscode.window.showTextDocument(doc, { preview: true });
 }
 
-async function getLatestSessionCost(): Promise<Cost | undefined> {
+function activeClaudeTabLabel(): string | undefined {
+  const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+  if (!tab || !(tab.input instanceof vscode.TabInputWebview) || !tab.input.viewType.includes("claudeVSCodePanel")) return undefined;
+  return tab.label;
+}
+
+async function getLatestSessionCost(activeTabLabel?: string): Promise<Cost | undefined> {
   let paths: string[];
   try { paths = (await fs.readdir(projectsPath, { recursive: true })).filter(p => p.endsWith(".jsonl")); } catch { return undefined; }
   const candidates = await Promise.all(paths.map(async relative => {
     const absolute = path.join(projectsPath, relative);
     try { return { absolute, mtime: (await fs.stat(absolute)).mtimeMs }; } catch { return undefined; }
   }));
-  const latest = candidates.filter((x): x is { absolute: string; mtime: number } => Boolean(x)).sort((a, b) => b.mtime - a.mtime)[0];
-  if (!latest) return undefined;
-  const records = (await fs.readFile(latest.absolute, "utf8")).split("\n").flatMap(line => { try { return [JSON.parse(line) as LogRecord]; } catch { return []; } });
+  const sorted = candidates.filter((x): x is { absolute: string; mtime: number } => Boolean(x)).sort((a, b) => b.mtime - a.mtime);
+  let selected = sorted[0];
+  if (activeTabLabel && activeTabLabel !== "Claude Code") {
+    const match = await findTranscriptForTab(sorted, activeTabLabel);
+    if (match) selected = match;
+  }
+  if (!selected) return undefined;
+  const records = parseLogRecords(await fs.readFile(selected.absolute, "utf8"));
   const assistant = deduplicateRequests(records.filter(record => record.type === "assistant" && record.message?.usage));
   const last = assistant.at(-1);
   if (!last?.message?.usage) return undefined;
@@ -200,8 +219,35 @@ async function getLatestSessionCost(): Promise<Cost | undefined> {
   };
 }
 
+async function findTranscriptForTab(candidates: Array<{ absolute: string; mtime: number }>, label: string): Promise<{ absolute: string; mtime: number } | undefined> {
+  const prefix = normalizeTabTitle(label);
+  if (!prefix) return undefined;
+  // Open tabs are overwhelmingly recent. Bounding this scan prevents old or
+  // very large Claude histories from slowing down a tab switch.
+  for (const candidate of candidates.slice(0, 100)) {
+    try {
+      const handle = await fs.open(candidate.absolute, "r");
+      try {
+        const buffer = Buffer.alloc(64 * 1024);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        const title = parseLogRecords(buffer.subarray(0, bytesRead).toString("utf8")).find(record => record.type === "ai-title")?.aiTitle;
+        if (title && normalizeTabTitle(title).startsWith(prefix)) return candidate;
+      } finally { await handle.close(); }
+    } catch { /* Ignore transcripts concurrently rotated or removed by Claude. */ }
+  }
+  return undefined;
+}
+
+function normalizeTabTitle(title: string): string {
+  return title.trim().replace(/[.…]+$/u, "").trim().toLocaleLowerCase();
+}
+
+function parseLogRecords(content: string): LogRecord[] {
+  return content.split("\n").flatMap(line => { try { return [JSON.parse(line) as LogRecord]; } catch { return []; } });
+}
+
 type TokenUsage = { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; cache_creation?: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number } };
-type LogRecord = { type?: string; uuid?: string; requestId?: string; sessionId?: string; message?: { model?: string; usage?: TokenUsage; content?: unknown } };
+type LogRecord = { type?: string; aiTitle?: string; uuid?: string; requestId?: string; sessionId?: string; message?: { model?: string; usage?: TokenUsage; content?: unknown } };
 function deduplicateRequests(records: LogRecord[]): LogRecord[] {
   const byRequest = new Map<string, LogRecord>();
   records.forEach((record, index) => {

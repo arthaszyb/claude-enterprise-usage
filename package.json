@@ -2,7 +2,7 @@
   "name": "claude-enterprise-usage",
   "displayName": "Claude Enterprise Usage",
   "description": "Shows Claude Enterprise member usage in the VS Code status bar.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "SeanYangZhou",
   "license": "MIT",
   "repository": {
