@@ -23,6 +23,8 @@ type Cost = { last: number; session: number; sessionId?: string; model?: string 
 
 const cachePath = path.join(os.homedir(), ".claude", "enterprise-usage-history.json");
 const projectsPath = path.join(os.homedir(), ".claude", "projects");
+const REMOTE_REFRESH_MS = 15 * 60 * 1000;
+const RATE_LIMIT_BACKOFF_MS = 30 * 60 * 1000;
 
 export function activate(context: vscode.ExtensionContext): void {
   const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 20);
@@ -31,17 +33,30 @@ export function activate(context: vscode.ExtensionContext): void {
 
   let latest: UsageResponse | undefined;
   let cost: Cost | undefined;
-  const refresh = async (quiet = false) => {
+  let nextUsageFetchAt = 0;
+  let usageStatus: string | undefined;
+  const refresh = async (quiet = false, allowRemote = true) => {
+    // This is fast and entirely local: it is safe to run once per Claude response.
     try {
       cost = await getLatestSessionCost();
-      latest = await fetchUsage();
-      render(item, latest, cost);
-      await appendSnapshot(latest);
     } catch (error) {
-      item.text = "$(warning) Claude usage unavailable";
-      item.tooltip = `Claude Enterprise Usage\n${error instanceof Error ? error.message : String(error)}`;
-      if (!quiet) vscode.window.showWarningMessage("Could not refresh Claude usage. Run Claude Code /login, then try again.");
+      usageStatus = `Could not read local Claude Code log: ${error instanceof Error ? error.message : String(error)}`;
     }
+    if (allowRemote && Date.now() >= nextUsageFetchAt) {
+      try {
+        latest = await fetchUsage();
+        nextUsageFetchAt = Date.now() + REMOTE_REFRESH_MS;
+        usageStatus = undefined;
+        await appendSnapshot(latest);
+      } catch (error) {
+        const retryAfter = error instanceof UsageRequestError ? error.retryAfterMs : undefined;
+        nextUsageFetchAt = Date.now() + (retryAfter ?? RATE_LIMIT_BACKOFF_MS);
+        usageStatus = error instanceof Error ? error.message : String(error);
+        // Preserve the last successful MTD response instead of replacing it with an error.
+        if (!quiet && !latest) vscode.window.showWarningMessage(`Claude usage refresh deferred: ${usageStatus}`);
+      }
+    }
+    render(item, latest ?? {}, cost, usageStatus, nextUsageFetchAt);
     item.show();
   };
 
@@ -51,28 +66,35 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   void refresh(true);
-  const seconds = vscode.workspace.getConfiguration("claudeEnterpriseUsage").get<number>("refreshIntervalSeconds", 300);
+  const seconds = vscode.workspace.getConfiguration("claudeEnterpriseUsage").get<number>("refreshIntervalSeconds", 900);
   context.subscriptions.push(new vscode.Disposable(() => item.dispose()));
   const timer = setInterval(() => void refresh(true), Math.max(seconds, 60) * 1000);
   context.subscriptions.push({ dispose: () => clearInterval(timer) });
 
-  // Claude Code appends an assistant record after every model response. Update the
-  // token-derived request/session estimates immediately; refresh the API-backed MTD too.
+  // Claude Code appends an assistant record after every model response. Update only
+  // local token estimates here: the API-backed MTD is intentionally rate-limited.
   try {
     let debounce: NodeJS.Timeout | undefined;
     const watcher = watch(projectsPath, { recursive: true }, () => {
       clearTimeout(debounce);
-      debounce = setTimeout(() => void refresh(true), 900);
+      debounce = setTimeout(() => void refresh(true, false), 900);
     });
     context.subscriptions.push({ dispose: () => { clearTimeout(debounce); watcher.close(); } });
   } catch { /* The extension still works where recursive filesystem watch is unavailable. */ }
 }
 
+class UsageRequestError extends Error {
+  constructor(message: string, readonly retryAfterMs?: number) { super(message); }
+}
 async function fetchUsage(): Promise<UsageResponse> {
   const token = await readClaudeToken();
   const response = await fetch(USAGE_URL, { headers: { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20" } });
-  if (response.status === 401) throw new Error("Claude Code login has expired. Run `claude /login`.");
-  if (!response.ok) throw new Error(`Anthropic returned HTTP ${response.status}.`);
+  if (response.status === 401) throw new UsageRequestError("Claude Code login has expired. Run `claude /login`.");
+  if (response.status === 429) {
+    const seconds = Number(response.headers.get("retry-after"));
+    throw new UsageRequestError("Anthropic rate-limited the monthly-usage request; showing cached data.", Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined);
+  }
+  if (!response.ok) throw new UsageRequestError(`Anthropic returned HTTP ${response.status}.`);
   return await response.json() as UsageResponse;
 }
 
@@ -96,7 +118,7 @@ async function readClaudeToken(): Promise<string> {
   throw new Error("No Claude Code OAuth credential found.");
 }
 
-function render(item: vscode.StatusBarItem, usage: UsageResponse, cost?: Cost): void {
+function render(item: vscode.StatusBarItem, usage: UsageResponse, cost?: Cost, status?: string, nextUsageFetchAt?: number): void {
   const session = percentUsed(usage.five_hour);
   const week = percentUsed(usage.seven_day);
   const month = usage.spend?.percent ?? percentUsed(usage.monthly ?? usage.month);
@@ -110,6 +132,7 @@ function render(item: vscode.StatusBarItem, usage: UsageResponse, cost?: Cost): 
     spendLabel ? `Monthly Enterprise spend: ${spendLabel}` : (month !== undefined ? `Monthly usage: ${month}% used${resetText(usage.monthly ?? usage.month)}` : "Monthly field unavailable from Claude Code; open Claude member Usage for the source of truth."),
     cost ? `Last response: ~${usd(cost.last)} · current session: ~${usd(cost.session)} (${cost.model ?? "unknown model"})` : undefined,
     "Request/session costs are API-price estimates calculated from local Claude Code token logs; Enterprise MTD is the server-reported amount.",
+    status ? `${status}${nextUsageFetchAt ? ` Next monthly refresh after ${new Date(nextUsageFetchAt).toLocaleTimeString()}.` : ""}` : undefined,
     "Click for details · Command Palette: Claude Enterprise Usage: Refresh"
   ].filter(Boolean).join("\n");
 }

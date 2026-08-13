@@ -2,7 +2,7 @@
 
 Shows the current Claude Code quota in VS Code and records a local month-to-date history.
 
-It uses the OAuth credential already created by `claude /login`; it never sends credentials to any service other than Anthropic. The status bar refreshes every five minutes by default, and detects a completed Claude Code response from its local session log to update the current-response and session estimates immediately. Click it for a breakdown and a link to Claude's member Usage page.
+It uses the OAuth credential already created by `claude /login`; it never sends credentials to any service other than Anthropic. A completed Claude Code response updates the current-response and session estimates immediately from its local session log. The API-backed Enterprise monthly usage is cached and requested at most once per 15 minutes; after an HTTP 429, the extension keeps the last known monthly figure and waits at least 30 minutes (or Anthropic's `Retry-After` value).
 
 `Now` and `Session` are token-based estimates using public API list pricing. `MTD` is the server-reported Enterprise spend/limit and is authoritative; it can lag a just-completed request briefly.
 

@@ -2,7 +2,7 @@
   "name": "claude-enterprise-usage",
   "displayName": "Claude Enterprise Usage",
   "description": "Shows Claude Enterprise member usage in the VS Code status bar.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "local",
   "license": "MIT",
   "engines": { "vscode": "^1.94.0" },
@@ -18,8 +18,8 @@
       "title": "Claude Enterprise Usage",
       "properties": {
         "claudeEnterpriseUsage.refreshIntervalSeconds": {
-          "type": "number", "default": 300, "minimum": 60,
-          "description": "How often to refresh the usage data."
+          "type": "number", "default": 900, "minimum": 60,
+          "description": "How often to check whether monthly usage can be refreshed. Monthly requests are capped at once every 15 minutes to avoid Anthropic rate limits."
         },
         "claudeEnterpriseUsage.showEstimatedCost": {
           "type": "boolean", "default": true,
