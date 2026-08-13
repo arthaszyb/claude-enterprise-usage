@@ -19,9 +19,11 @@ type UsageResponse = {
 };
 
 type Snapshot = { recordedAt: string; fiveHour?: number; sevenDay?: number; monthly?: number };
-type Cost = { last: number; session: number; sessionId?: string; model?: string };
+type Cost = { current: number; session: number; sessionId?: string; model?: string };
+type UsageCache = { fetchedAt: string; usage: UsageResponse };
 
 const cachePath = path.join(os.homedir(), ".claude", "enterprise-usage-history.json");
+const latestUsagePath = path.join(os.homedir(), ".claude", "enterprise-usage-cache.json");
 const projectsPath = path.join(os.homedir(), ".claude", "projects");
 const REMOTE_REFRESH_MS = 15 * 60 * 1000;
 const RATE_LIMIT_BACKOFF_MS = 30 * 60 * 1000;
@@ -42,11 +44,19 @@ export function activate(context: vscode.ExtensionContext): void {
     } catch (error) {
       usageStatus = `Could not read local Claude Code log: ${error instanceof Error ? error.message : String(error)}`;
     }
+    if (!latest) {
+      const cached = await readUsageCache();
+      if (cached) {
+        latest = cached.usage;
+        nextUsageFetchAt = Math.max(nextUsageFetchAt, new Date(cached.fetchedAt).getTime() + REMOTE_REFRESH_MS);
+      }
+    }
     if (allowRemote && Date.now() >= nextUsageFetchAt) {
       try {
         latest = await fetchUsage();
         nextUsageFetchAt = Date.now() + REMOTE_REFRESH_MS;
         usageStatus = undefined;
+        await writeUsageCache(latest);
         await appendSnapshot(latest);
       } catch (error) {
         const retryAfter = error instanceof UsageRequestError ? error.retryAfterMs : undefined;
@@ -119,19 +129,15 @@ async function readClaudeToken(): Promise<string> {
 }
 
 function render(item: vscode.StatusBarItem, usage: UsageResponse, cost?: Cost, status?: string, nextUsageFetchAt?: number): void {
-  const session = percentUsed(usage.five_hour);
-  const week = percentUsed(usage.seven_day);
   const month = usage.spend?.percent ?? percentUsed(usage.monthly ?? usage.month);
   const spendLabel = formatSpend(usage.spend);
-  const mtd = spendLabel ?? (month !== undefined ? `MTD ${month}%` : `S: ${session ?? "–"}% · W: ${week ?? "–"}%`);
-  item.text = `$(pulse) Claude ${cost ? `Now ${usd(cost.last)} · Session ${usd(cost.session)} · ` : ""}${mtd}`;
+  const mtd = spendLabel ? `Monthly ${spendLabel}` : (month !== undefined ? `Monthly ${month}%` : "Monthly –");
+  item.text = `$(pulse) Claude ${cost ? `Current ${usd(cost.current)} · Session ${usd(cost.session)} · ` : ""}${mtd}`;
   item.tooltip = [
     "Claude Enterprise Usage",
-    session !== undefined ? `Current 5-hour window: ${session}% used${resetText(usage.five_hour)}` : undefined,
-    week !== undefined ? `7-day window: ${week}% used${resetText(usage.seven_day)}` : undefined,
     spendLabel ? `Monthly Enterprise spend: ${spendLabel}` : (month !== undefined ? `Monthly usage: ${month}% used${resetText(usage.monthly ?? usage.month)}` : "Monthly field unavailable from Claude Code; open Claude member Usage for the source of truth."),
-    cost ? `Last response: ~${usd(cost.last)} · current session: ~${usd(cost.session)} (${cost.model ?? "unknown model"})` : undefined,
-    "Request/session costs are API-price estimates calculated from local Claude Code token logs; Enterprise MTD is the server-reported amount.",
+    cost ? `Current chat turn: ~${usd(cost.current)} · current session: ~${usd(cost.session)} (${cost.model ?? "unknown model"})` : undefined,
+    "Current/session costs deduplicate model request IDs and use local Claude Code token logs. Monthly is the server-reported Enterprise amount.",
     status ? `${status}${nextUsageFetchAt ? ` Next monthly refresh after ${new Date(nextUsageFetchAt).toLocaleTimeString()}.` : ""}` : undefined,
     "Click for details · Command Palette: Claude Enterprise Usage: Refresh"
   ].filter(Boolean).join("\n");
@@ -159,9 +165,7 @@ async function showDetails(usage?: UsageResponse, cost?: Cost): Promise<void> {
   const lines = [
     `# Claude Enterprise Usage`,
     spendLabel ? `**Monthly Enterprise spend:** ${spendLabel}` : (month !== undefined ? `**Monthly usage:** ${month}% used` : "**Monthly usage:** not returned by the Claude Code usage endpoint."),
-    cost ? `**Latest response estimate:** ${usd(cost.last)}\n\n**Current session estimate:** ${usd(cost.session)} (${cost.model ?? "unknown model"})` : "**Current response/session cost:** no Claude Code log found.",
-    `**5-hour window:** ${percentUsed(usage?.five_hour) ?? "Unavailable"}% used`,
-    `**7-day window:** ${percentUsed(usage?.seven_day) ?? "Unavailable"}% used`,
+    cost ? `**Current chat turn estimate:** ${usd(cost.current)}\n\n**Current session estimate:** ${usd(cost.session)} (${cost.model ?? "unknown model"})` : "**Current turn/session cost:** no Claude Code log found.",
     "",
     `Local snapshots this month: ${history.filter(s => s.recordedAt.startsWith(new Date().toISOString().slice(0, 7))).length}`,
     "",
@@ -181,17 +185,47 @@ async function getLatestSessionCost(): Promise<Cost | undefined> {
   const latest = candidates.filter((x): x is { absolute: string; mtime: number } => Boolean(x)).sort((a, b) => b.mtime - a.mtime)[0];
   if (!latest) return undefined;
   const records = (await fs.readFile(latest.absolute, "utf8")).split("\n").flatMap(line => { try { return [JSON.parse(line) as LogRecord]; } catch { return []; } });
-  const seen = new Set<string>();
-  const assistant = records.filter(record => record.type === "assistant" && record.message?.usage && !seen.has(record.uuid ?? "") && (seen.add(record.uuid ?? ""), true));
+  const assistant = deduplicateRequests(records.filter(record => record.type === "assistant" && record.message?.usage));
   const last = assistant.at(-1);
   if (!last?.message?.usage) return undefined;
   const sessionId = last.sessionId;
   const inSession = assistant.filter(record => record.sessionId === sessionId);
-  return { last: estimateCost(last.message.model, last.message.usage), session: inSession.reduce((total, record) => total + estimateCost(record.message?.model, record.message?.usage), 0), sessionId, model: last.message.model };
+  const latestHumanIndex = findLatestHumanPromptIndex(records, sessionId);
+  const currentRequests = deduplicateRequests(records.slice(latestHumanIndex + 1).filter(record => record.type === "assistant" && record.message?.usage && record.sessionId === sessionId));
+  return {
+    current: currentRequests.reduce((total, record) => total + estimateCost(record.message?.model, record.message?.usage), 0),
+    session: inSession.reduce((total, record) => total + estimateCost(record.message?.model, record.message?.usage), 0),
+    sessionId,
+    model: last.message.model
+  };
 }
 
 type TokenUsage = { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; cache_creation?: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number } };
-type LogRecord = { type?: string; uuid?: string; sessionId?: string; message?: { model?: string; usage?: TokenUsage } };
+type LogRecord = { type?: string; uuid?: string; requestId?: string; sessionId?: string; message?: { model?: string; usage?: TokenUsage; content?: unknown } };
+function deduplicateRequests(records: LogRecord[]): LogRecord[] {
+  const byRequest = new Map<string, LogRecord>();
+  records.forEach((record, index) => {
+    const key = record.requestId || record.uuid || `record-${index}`;
+    const previous = byRequest.get(key);
+    // Duplicate stream records normally contain identical cumulative usage. If
+    // they differ, keep the largest/final usage record for that API request.
+    if (!previous || estimateCost(record.message?.model, record.message?.usage) >= estimateCost(previous.message?.model, previous.message?.usage)) byRequest.set(key, record);
+  });
+  return [...byRequest.values()];
+}
+function findLatestHumanPromptIndex(records: LogRecord[], sessionId?: string): number {
+  for (let index = records.length - 1; index >= 0; index--) {
+    const record = records[index];
+    if (record.type !== "user" || record.sessionId !== sessionId) continue;
+    const content = record.message?.content;
+    if (typeof content === "string" && !content.startsWith("<local-command-")) return index;
+    if (Array.isArray(content) && content.some(block => isHumanTextBlock(block))) return index;
+  }
+  return -1;
+}
+function isHumanTextBlock(block: unknown): boolean {
+  return Boolean(block && typeof block === "object" && (block as { type?: string }).type === "text" && !(block as { text?: string }).text?.startsWith("<local-command-"));
+}
 function estimateCost(model: string | undefined, usage: TokenUsage | undefined): number {
   if (!usage) return 0;
   const name = model?.toLowerCase() ?? "";
@@ -200,8 +234,12 @@ function estimateCost(model: string | undefined, usage: TokenUsage | undefined):
   const input = (usage.input_tokens ?? 0) * base[0] / 1_000_000;
   const output = (usage.output_tokens ?? 0) * base[1] / 1_000_000;
   const read = (usage.cache_read_input_tokens ?? 0) * base[0] * 0.1 / 1_000_000;
+  const hasCacheBreakdown = usage.cache_creation !== undefined;
   const oneHour = (usage.cache_creation?.ephemeral_1h_input_tokens ?? 0) * base[0] * 2 / 1_000_000;
-  const fiveMinutes = ((usage.cache_creation?.ephemeral_5m_input_tokens ?? 0) || usage.cache_creation_input_tokens || 0) * base[0] * 1.25 / 1_000_000;
+  const fiveMinuteTokens = hasCacheBreakdown
+    ? (usage.cache_creation?.ephemeral_5m_input_tokens ?? 0)
+    : (usage.cache_creation_input_tokens ?? 0);
+  const fiveMinutes = fiveMinuteTokens * base[0] * 1.25 / 1_000_000;
   return input + output + read + oneHour + fiveMinutes;
 }
 
@@ -213,4 +251,11 @@ async function appendSnapshot(usage: UsageResponse): Promise<void> {
 }
 async function readHistory(): Promise<Snapshot[]> {
   try { return JSON.parse(await fs.readFile(cachePath, "utf8")) as Snapshot[]; } catch { return []; }
+}
+async function writeUsageCache(usage: UsageResponse): Promise<void> {
+  await fs.mkdir(path.dirname(latestUsagePath), { recursive: true });
+  await fs.writeFile(latestUsagePath, JSON.stringify({ fetchedAt: new Date().toISOString(), usage }, null, 2), { mode: 0o600 });
+}
+async function readUsageCache(): Promise<UsageCache | undefined> {
+  try { return JSON.parse(await fs.readFile(latestUsagePath, "utf8")) as UsageCache; } catch { return undefined; }
 }
