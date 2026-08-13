@@ -3,8 +3,16 @@
   "displayName": "Claude Enterprise Usage",
   "description": "Shows Claude Enterprise member usage in the VS Code status bar.",
   "version": "0.3.0",
-  "publisher": "local",
+  "publisher": "SeanYangZhou",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/arthaszyb/claude-enterprise-usage.git"
+  },
+  "homepage": "https://github.com/arthaszyb/claude-enterprise-usage#readme",
+  "bugs": {
+    "url": "https://github.com/arthaszyb/claude-enterprise-usage/issues"
+  },
   "engines": { "vscode": "^1.94.0" },
   "categories": ["Other"],
   "activationEvents": ["onStartupFinished"],
