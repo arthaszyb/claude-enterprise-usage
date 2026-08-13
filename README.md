@@ -16,11 +16,11 @@ For exact organization-wide spend, use the Enterprise Analytics API with an admi
 
 Marketplace releases are published from GitHub Actions when a semantic version tag such as `v0.3.1` is pushed. The tag must match the version in `package.json`.
 
-One-time setup: under the `SeanYangZhou` publisher in Visual Studio Marketplace, configure trusted publishing for:
+One-time setup:
 
-- GitHub owner: `arthaszyb`
-- Repository: `claude-enterprise-usage`
-- Workflow: `.github/workflows/publish.yml`
+1. Create an Azure DevOps Personal Access Token for **All accessible organizations** with **Marketplace → Manage** permission.
+2. Open the GitHub repository's **Settings → Secrets and variables → Actions**.
+3. Add a repository secret named `VSCE_PAT` containing that token.
 
 To release a patch update:
 
@@ -30,3 +30,5 @@ git push origin main --follow-tags
 ```
 
 Use `version:minor` for backward-compatible features and `version:major` for breaking changes. VS Code automatically offers Marketplace updates to users who have extension auto-update enabled.
+
+> Microsoft plans to retire global Azure DevOps PATs on December 1, 2026. Before then, migrate this workflow to Microsoft Entra ID workload identity when a suitable GitHub Actions flow is generally available, or use the documented Azure Pipelines managed-identity flow.

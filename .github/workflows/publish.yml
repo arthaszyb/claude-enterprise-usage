@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   publish:
@@ -48,5 +47,6 @@ jobs:
           path: "*.vsix"
 
       - name: Publish to Visual Studio Marketplace
-        run: npx @vscode/vsce publish --oidc
-
+        run: npx @vscode/vsce publish
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
