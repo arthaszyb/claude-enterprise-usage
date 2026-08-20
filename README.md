@@ -14,13 +14,13 @@ For exact organization-wide spend, use the Enterprise Analytics API with an admi
 
 ## Releases
 
-Releases are built by GitHub Actions when a semantic version tag such as `v0.3.1` is pushed. The tag must match the version in `package.json`. Every tag creates a GitHub Release with the installable VSIX attached and publishes the same package to Visual Studio Marketplace.
+Releases are built by GitHub Actions when a semantic version tag such as `v0.3.1` is pushed. The tag must match the version in `package.json`. Every tag creates a GitHub Release with the installable VSIX attached. If `VSCE_PAT` is configured, the same package is also published to Visual Studio Marketplace.
 
-Marketplace publishing uses GitHub OIDC trusted publishing. The workflow requests a short-lived Marketplace credential for each release, so no Azure DevOps PAT or GitHub secret is stored. The Marketplace publisher must trust:
+One-time Marketplace setup:
 
-- GitHub owner: `arthaszyb`
-- Repository: `claude-enterprise-usage`
-- Workflow: `publish.yml`
+1. Create an Azure DevOps Personal Access Token for **All accessible organizations** with **Marketplace → Manage** permission.
+2. Open the GitHub repository's **Settings → Secrets and variables → Actions**.
+3. Add a repository secret named `VSCE_PAT` containing that token.
 
 To release a patch update:
 
@@ -30,3 +30,5 @@ git push origin main --follow-tags
 ```
 
 Use `version:minor` for backward-compatible features and `version:major` for breaking changes. VS Code automatically offers Marketplace updates to users who have extension auto-update enabled.
+
+> Microsoft plans to retire global Azure DevOps PATs on December 1, 2026. The Marketplace does not yet expose GitHub OIDC trusted-publisher policies generally. Migrate when Microsoft makes that flow generally available, or use the documented Microsoft Entra workload-identity flow in Azure Pipelines.
