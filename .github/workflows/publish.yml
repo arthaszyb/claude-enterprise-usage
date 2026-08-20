@@ -6,7 +6,8 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: read
+  contents: write
+  id-token: write
 
 jobs:
   publish:
@@ -46,7 +47,19 @@ jobs:
           name: claude-enterprise-usage-${{ github.ref_name }}
           path: "*.vsix"
 
-      - name: Publish to Visual Studio Marketplace
-        run: npx @vscode/vsce publish
+      - name: Create GitHub release
         env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" ./*.vsix --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" ./*.vsix \
+              --verify-tag \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi
+
+      - name: Publish to Visual Studio Marketplace
+        run: npx @vscode/vsce publish --packagePath ./*.vsix --oidc
